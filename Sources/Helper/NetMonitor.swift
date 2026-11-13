@@ -22,6 +22,18 @@ final class NetMonitor: @unchecked Sendable {
     private var pending = ""
     private var frame: [String] = []
     private(set) var isRunning = false
+    /// Cumulative bytes per open socket from the latest nettop frame, keyed by
+    /// `SocketKey`. lsof lists connections but carries no byte counts, so
+    /// without this every connection reported 0 bytes and the per-domain and
+    /// per-country totals built from them were all zero.
+    private var socketBytes: [SocketKey: (bytesIn: Int64, bytesOut: Int64)] = [:]
+
+    struct SocketKey: Hashable {
+        let pid: Int32
+        let localPort: Int
+        let remoteIP: String
+        let remotePort: Int
+    }
 
     /// Start and stop arrive on XPC threads while nettop output is parsed on
     /// `queue`; running both there keeps the frame state single-threaded.
@@ -48,6 +60,7 @@ final class NetMonitor: @unchecked Sendable {
         nettopProc?.terminate(); nettopProc = nil
         nettopInput = nil
         pending = ""; frame = []
+        socketBytes = [:]
         isRunning = false
     }
 
@@ -85,7 +98,15 @@ final class NetMonitor: @unchecked Sendable {
             case "c":
                 pname = rest
             case "n":
-                if let c = parseN(line: rest, pid: pid, name: pname) { conns.append(c) }
+                if var c = parseN(line: rest, pid: pid, name: pname) {
+                    let key = SocketKey(pid: pid, localPort: c.localPort,
+                                        remoteIP: Self.normalizedIP(c.remoteIP), remotePort: c.remotePort)
+                    if let bytes = socketBytes[key] {
+                        c.bytesIn = bytes.bytesIn
+                        c.bytesOut = bytes.bytesOut
+                    }
+                    conns.append(c)
+                }
             default: break
             }
         }
@@ -165,7 +186,9 @@ final class NetMonitor: @unchecked Sendable {
     private func startNettop() {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/nettop")
-        p.arguments = ["-P", "-x", "-L", "0", "-J", "bytes_in,bytes_out", "-s", "1"]
+        // Without -P nettop lists each socket under its process line, which
+        // is the only source of per-connection byte counts.
+        p.arguments = ["-x", "-L", "0", "-J", "bytes_in,bytes_out", "-s", "1"]
         let pipe = Pipe(); p.standardOutput = pipe; p.standardError = Pipe()
         // nettop watches its standard input, and at end of file that watch
         // fires without pause: launchd gives the helper /dev/null, so nettop
@@ -214,13 +237,31 @@ final class NetMonitor: @unchecked Sendable {
 
     private func completeFrame(_ lines: [String]) {
         var usages: [ProcessUsage] = []
+        var sockets: [SocketKey: (bytesIn: Int64, bytesOut: Int64)] = [:]
+        var currentPID: Int32?
         for line in lines {
-            let parts = line.split(separator: ",")
-            guard parts.count >= 3,
-                  let bin = Int64(parts[parts.count - 2]),
-                  let bout = Int64(parts[parts.count - 1]) else { continue }
-
+            let parts = line.split(separator: ",", omittingEmptySubsequences: false)
+            guard parts.count >= 3 else { continue }
             let identifier = String(parts[0])
+
+            // Socket rows: "tcp4 10.0.0.2:52034<->17.188.185.133:5223,in,out,"
+            if let space = identifier.firstIndex(of: " "),
+               ["tcp4", "tcp6", "udp4", "udp6"].contains(String(identifier[..<space])) {
+                guard let pid = currentPID,
+                      let bin = Int64(parts[1]), let bout = Int64(parts[2]),
+                      let key = Self.socketKey(pid: pid,
+                                               family: String(identifier[..<space]),
+                                               endpoints: String(identifier[identifier.index(after: space)...])) else { continue }
+                let existing = sockets[key] ?? (0, 0)
+                sockets[key] = (existing.bytesIn + bin, existing.bytesOut + bout)
+                continue
+            }
+
+            // Process rows: "apsd.144,11652,145939,"
+            guard let bin = Int64(parts[1]), let bout = Int64(parts[2]) else {
+                currentPID = nil
+                continue
+            }
             let separator = identifier.lastIndex(of: ".")
             let processName: String
             let pid: Int32?
@@ -232,9 +273,31 @@ final class NetMonitor: @unchecked Sendable {
                 processName = identifier
                 pid = nil
             }
+            currentPID = pid
             usages.append(ProcessUsage(processName: processName, pid: pid, bytesIn: bin, bytesOut: bout))
         }
+        socketBytes = sockets
         onProcessUsage?(usages)
+    }
+
+    /// nettop writes IPv4 endpoints as `addr:port` and IPv6 as `addr.port`.
+    static func socketKey(pid: Int32, family: String, endpoints: String) -> SocketKey? {
+        let halves = endpoints.components(separatedBy: "<->")
+        guard halves.count == 2 else { return nil }
+        let separator: Character = family.hasSuffix("6") ? "." : ":"
+        func split(_ endpoint: String) -> (String, Int)? {
+            guard let index = endpoint.lastIndex(of: separator),
+                  let port = Int(endpoint[endpoint.index(after: index)...]) else { return nil }
+            return (String(endpoint[..<index]), port)
+        }
+        guard let local = split(halves[0]), let remote = split(halves[1]) else { return nil }
+        return SocketKey(pid: pid, localPort: local.1, remoteIP: normalizedIP(remote.0), remotePort: remote.1)
+    }
+
+    /// Drops an IPv6 zone ("fe80::1%en0") and case, so lsof and nettop agree.
+    static func normalizedIP(_ ip: String) -> String {
+        let bare = ip.split(separator: "%", maxSplits: 1).first.map(String.init) ?? ip
+        return bare.lowercased()
     }
 
     /// The live speed comes from the interface counters, once a second.
