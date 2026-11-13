@@ -420,6 +420,11 @@ struct MonitorDecisionControls: View {
                 MonitorDecisionBadge(decision: decision)
             }
         }
+        // The controls keep their natural width and the row's title truncates
+        // instead. Squeezed, "Deny" collapsed to "D" and "Reset" wrapped.
+        .lineLimit(1)
+        .fixedSize()
+        .layoutPriority(1)
         .modifier(OptionalHelp(text: revealed ? unavailableReason : nil))
     }
 
