@@ -63,3 +63,6 @@ Scripts/sparkle_eddsa_private.key
 sparkle_eddsa_private.key
 *.sparkle-private-key
 docs/sparkle-archives/
+
+# Fork build output
+dist/
