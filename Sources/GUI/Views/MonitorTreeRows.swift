@@ -244,68 +244,76 @@ struct MonitorTreeList: View {
 
 struct MonitorAppRow: View {
     let app: MonitorAppNode
-    /// A selected row is drawn on the accent colour, which swallows anything
-    /// else drawn in a saturated colour, so every coloured element on the row
-    /// needs to know (#75, #76).
     let selected: Bool
     let peakTraffic: Int64
     let decision: Rule?
     let pending: Bool
     let onDecide: (RuleAction) -> Void
     let onClear: () -> Void
+    @State private var hovering = false
 
     var body: some View {
-        HStack(spacing: 6) {
-            if app.isWebContent {
-                Image(systemName: "safari")
-                    .foregroundStyle(.secondary)
-                    .frame(width: 16, height: 16)
-            } else if let icon = MonitorAppIconCache.icon(for: app) {
-                Image(nsImage: icon).resizable().frame(width: 16, height: 16)
-            } else {
-                Image(systemName: "app.dashed")
-                    .foregroundStyle(.secondary)
-                    .frame(width: 16, height: 16)
-            }
-
+        HStack(spacing: 8) {
+            icon
             VStack(alignment: .leading, spacing: 1) {
                 Text(app.displayName ?? app.name)
                     .font(.body)
                     .lineLimit(1)
-                    .modifier(OptionalHelp(text: app.displayName == nil ? nil : "Connections made by \(app.name)"))
-                Text(appSubtitle)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-            if app.deniedCount > 0 {
-                // The verdict, on the row, in the app's own words. The Monitor
-                // never showed one anywhere (#138).
-                Text("\(app.deniedCount) denied")
-                    .font(.caption)
-                    .foregroundStyle(Color(nsColor: .systemRed))
-                    .monospacedDigit()
-                    .help("\(app.deniedCount) of this app's connections were denied.")
+                    .truncationMode(.middle)
+                    .modifier(OptionalHelp(text: app.displayName == nil ? app.name : "Connections made by \(app.name)"))
+                MonitorSubtitle(parts: summaryParts, deniedCount: app.deniedCount)
             }
             Spacer(minLength: 4)
-            MonitorTrafficBars(traffic: app.traffic, peak: peakTraffic, onSelection: selected)
             MonitorDecisionControls(decision: decision,
                                     pending: pending,
                                     addressable: MonitorRuleTarget.app(app)?.isAddressable ?? false,
                                     subject: "every connection from \(app.name)",
+                                    revealed: hovering || selected,
                                     onSelection: selected,
                                     onDecide: onDecide,
                                     onClear: onClear)
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, 3)
+        .contentShape(Rectangle())
+        .onHover { hovering = $0 }
     }
 
-    /// The process's own name leads when the row is titled after its app,
-    /// because the rule a decision writes is for that process.
-    private var appSubtitle: String {
-        let summary = "\(app.destinationCount) destination\(app.destinationCount == 1 ? "" : "s") · \(PSFormat.bytes(app.traffic.total))"
-        guard app.displayName != nil else { return summary }
-        return "\(app.name) · \(summary)"
+    @ViewBuilder
+    private var icon: some View {
+        if app.isWebContent {
+            Image(systemName: "safari")
+                .foregroundStyle(.secondary)
+                .frame(width: 20, height: 20)
+        } else if let image = MonitorAppIconCache.icon(for: app) {
+            Image(nsImage: image).resizable().frame(width: 20, height: 20)
+        } else {
+            Image(systemName: "app.dashed")
+                .foregroundStyle(.secondary)
+                .frame(width: 20, height: 20)
+        }
+    }
+
+    private var summaryParts: [String] {
+        var parts = ["\(app.destinationCount) destination\(app.destinationCount == 1 ? "" : "s")"]
+        if app.traffic.total > 0 { parts.append(PSFormat.bytes(app.traffic.total)) }
+        return parts
+    }
+}
+
+/// "8 destinations · 1.2 MB · 3 denied", with only the denied count in colour.
+/// Zero traffic is left out rather than shown as "0 bytes".
+struct MonitorSubtitle: View {
+    let parts: [String]
+    let deniedCount: Int
+
+    var body: some View {
+        (Text(parts.joined(separator: " · ")).foregroundColor(.secondary)
+         + (deniedCount > 0
+            ? Text(" · \(deniedCount) denied").foregroundColor(Color(nsColor: .systemRed))
+            : Text("")))
+            .font(.caption)
+            .lineLimit(1)
+            .monospacedDigit()
     }
 }
 
@@ -313,17 +321,16 @@ struct MonitorAppRow: View {
 
 struct MonitorDestinationRow: View {
     let destination: MonitorDestinationNode
-    /// True while the parent app row is selected, because the selection fill
-    /// extends over the children too.
     var selected: Bool = false
     let peakTraffic: Int64
     let decision: Rule?
     let pending: Bool
     let onDecide: (RuleAction) -> Void
     let onClear: () -> Void
+    @State private var hovering = false
 
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 8) {
             Image(systemName: destination.remoteHost == nil ? "number" : "globe")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -333,22 +340,21 @@ struct MonitorDestinationRow: View {
                     .font(.callout)
                     .lineLimit(1)
                     .truncationMode(.middle)
-                Text(subtitle)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                MonitorSubtitle(parts: subtitleParts, deniedCount: destination.deniedCount)
             }
             Spacer(minLength: 4)
-            MonitorTrafficBars(traffic: destination.traffic, peak: peakTraffic, onSelection: selected)
             MonitorDecisionControls(decision: decision,
                                     pending: pending,
                                     addressable: isAddressable,
                                     subject: destination.decisionSubject,
+                                    revealed: hovering || selected,
                                     onSelection: selected,
                                     onDecide: onDecide,
                                     onClear: onClear)
         }
         .padding(.vertical, 1)
+        .contentShape(Rectangle())
+        .onHover { hovering = $0 }
     }
 
     private var isAddressable: Bool {
@@ -357,129 +363,64 @@ struct MonitorDestinationRow: View {
         return false
     }
 
-    private var subtitle: String {
-        var parts = ["\(destination.connectionCount) connection\(destination.connectionCount == 1 ? "" : "s")"]
-        if destination.labelIsSeenName, let ip = destination.remoteIP { parts.insert(ip, at: 0) }
-        if destination.deniedCount > 0 { parts.append("\(destination.deniedCount) denied") }
-        parts.append(PSFormat.bytes(destination.traffic.total))
+    private var subtitleParts: [String] {
+        var parts: [String] = []
+        if destination.labelIsSeenName, let ip = destination.remoteIP { parts.append(ip) }
+        parts.append("\(destination.connectionCount) connection\(destination.connectionCount == 1 ? "" : "s")")
+        if destination.traffic.total > 0 { parts.append(PSFormat.bytes(destination.traffic.total)) }
         if let code = destination.countryCode, !code.isEmpty { parts.append(code) }
-        return parts.joined(separator: " · ")
-    }
-}
-
-// MARK: - Traffic bars
-
-/// Sent and received for one row, on the same scale as its siblings so two
-/// rows can be compared by eye. Empty traffic draws nothing rather than a
-/// hairline that suggests activity that did not happen.
-struct MonitorTrafficBars: View {
-    let traffic: MonitorTrafficTotals
-    let peak: Int64
-    /// On a selected row the accent fill is behind these, and the sent bar was
-    /// drawn in system blue, so it disappeared into the selection entirely
-    /// (#76). On selection both bars switch to the selected-content colour and
-    /// separate by weight instead of by hue.
-    var onSelection: Bool = false
-    static let width: CGFloat = 42
-
-    static let sentColor = TrafficColor.sent
-    static let receivedColor = TrafficColor.received
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            bar(value: traffic.bytesOut, color: Self.sentColor)
-            bar(value: traffic.bytesIn, color: Self.receivedColor)
-        }
-        .frame(width: Self.width, alignment: .leading)
-        .help("Sent \(PSFormat.bytes(traffic.bytesOut)), received \(PSFormat.bytes(traffic.bytesIn))")
-        .accessibilityLabel("Sent \(PSFormat.bytes(traffic.bytesOut)), received \(PSFormat.bytes(traffic.bytesIn))")
-    }
-
-    private func bar(value: Int64, color: Color) -> some View {
-        ZStack(alignment: .leading) {
-            Capsule()
-                .fill(onSelection ? AnyShapeStyle(Color.white.opacity(0.25)) : AnyShapeStyle(.quaternary))
-                .frame(height: 3)
-            Capsule()
-                .fill(onSelection ? selectedFill(for: color) : color)
-                .frame(width: filledWidth(value), height: 3)
-        }
-        .frame(width: Self.width, height: 3)
-    }
-
-    /// Sent stays solid, received goes translucent, so the pair is still two
-    /// distinguishable values on top of the accent colour.
-    private func selectedFill(for color: Color) -> Color {
-        color == Self.sentColor ? .white : .white.opacity(0.55)
-    }
-
-    private func filledWidth(_ value: Int64) -> CGFloat {
-        guard value > 0, peak > 0 else { return 0 }
-        let fraction = min(1, Double(value) / Double(peak))
-        return max(2, Self.width * CGFloat(fraction))
+        return parts
     }
 }
 
 // MARK: - Decision controls
 
-/// The inline allow and deny for one row.
+/// Allow and Deny for one row, in words.
 ///
-/// Pressing one of these is the only way a decision is made in the monitor.
-/// Selecting a row, expanding it, or clicking anywhere else on it changes
-/// nothing about policy. When a rule already exists for exactly this row it is
-/// shown as the active choice and can be taken back with the clear control,
-/// which removes that rule.
+/// A row with no rule shows nothing until it is hovered or selected, then two
+/// labelled buttons. A row with a rule always shows that rule ("Allowed",
+/// "Denied"); hovering it offers the opposite choice and Reset, which removes
+/// the rule. Pressing a button is the only way the monitor makes a decision.
 struct MonitorDecisionControls: View {
     @EnvironmentObject var state: AppState
     let decision: Rule?
     let pending: Bool
     let addressable: Bool
     let subject: String
+    /// The row is hovered or selected, so its actions are on show.
+    var revealed: Bool = false
     var onSelection: Bool = false
     let onDecide: (RuleAction) -> Void
     let onClear: () -> Void
 
-    /// Rules live in the helper, so a decision cannot be made without it.
-    /// Saying so on the control beats letting the click through and answering
-    /// with an alert afterwards (#98).
     private var canDecide: Bool { state.helperConnected }
+    private var ruleActive: Bool { decision?.enabled == true }
 
     var body: some View {
-        HStack(spacing: 2) {
-            if let decision {
-                // The buttons alone did not say whether a click had taken
-                // (#142), so the rule in force is also named in words.
-                MonitorDecisionBadge(decision: decision)
-                    .padding(.trailing, 4)
-            }
-            button(action: .allow,
-                   symbol: "checkmark.circle.fill",
-                   color: .green,
-                   help: "Allow \(subject). Writes a rule you can see and change in Rules.")
-            button(action: .deny,
-                   symbol: "xmark.circle.fill",
-                   color: .red,
-                   help: "Deny \(subject). Writes a rule you can see and change in Rules.")
-            if decision != nil {
-                Button(action: onClear) {
-                    Image(systemName: "arrow.uturn.backward.circle.fill")
+        HStack(spacing: 6) {
+            if pending {
+                ProgressView().controlSize(.small)
+            } else if revealed && addressable && canDecide {
+                if !(ruleActive && decision?.action == .allow) {
+                    actionButton("Allow", action: .allow)
                 }
-                .accessibilityLabel("Remove the rule for \(subject)")
-                .buttonStyle(.borderless)
-                .foregroundStyle(onSelection ? AnyShapeStyle(Color.white.opacity(0.8)) : AnyShapeStyle(.secondary))
-                .disabled(pending || !canDecide)
-                .help(unavailableReason ?? "Remove the rule this row created and go back to no decision.")
+                if !(ruleActive && decision?.action == .deny) {
+                    actionButton("Deny", action: .deny)
+                }
+                if decision != nil {
+                    Button("Reset", action: onClear)
+                        .buttonStyle(.borderless)
+                        .controlSize(.small)
+                        .foregroundStyle(onSelection ? AnyShapeStyle(Color.white.opacity(0.85)) : AnyShapeStyle(.secondary))
+                        .help("Remove this rule. New connections follow the current mode again.")
+                        .accessibilityLabel("Remove the rule for \(subject)")
+                }
+            }
+            if let decision, !pending {
+                MonitorDecisionBadge(decision: decision)
             }
         }
-        .imageScale(.large)
-        // Really disabled, not painted to look it. Opacity plus
-        // allowsHitTesting left assistive technology seeing enabled controls,
-        // and an empty help string attached an empty tooltip (#120). The
-        // opacity stays as well: these glyphs carry explicit palette colours,
-        // which no button style dims on its own.
-        .disabled(!addressable || pending || !canDecide)
-        .opacity(addressable && canDecide ? 1 : 0.35)
-        .modifier(OptionalHelp(text: unavailableReason))
+        .modifier(OptionalHelp(text: revealed ? unavailableReason : nil))
     }
 
     private var unavailableReason: String? {
@@ -488,42 +429,16 @@ struct MonitorDecisionControls: View {
         return nil
     }
 
-    /// Filled symbol buttons, drawn in two layers.
-    ///
-    /// Outlined symbols read as decoration rather than as controls (#75), so
-    /// the glyph is always filled. What the rule state changes is the pair of
-    /// colours: at rest a tinted glyph on a faint disc, in force a white glyph
-    /// on a solid disc, which stays obvious on a selected row too.
-    private func button(action: RuleAction, symbol: String, color: Color, help: String) -> some View {
-        let isChosen = decision?.action == action
-        let isDisabledRule = isChosen && decision?.enabled == false
-        // A disabled rule decides nothing, so it is drawn at rest.
-        let isActive = isChosen && !isDisabledRule
-        return Button {
-            onDecide(action)
-        } label: {
-            Image(systemName: symbol)
-                .symbolRenderingMode(.palette)
-                .foregroundStyle(glyphColor(color, isActive: isActive), discColor(color, isActive: isActive))
-        }
-        .buttonStyle(.borderless)
-        .accessibilityLabel(action == .allow ? "Allow \(subject)" : "Deny \(subject)")
-        .disabled(pending || !canDecide)
-        .help(unavailableReason
-              ?? (isDisabledRule ? "\(help) A disabled rule for this row exists; pressing this enables it." : help))
-    }
-
-    /// At rest the disc was 85% of the in-force colour, so a row looked the
-    /// same before and after a decision (#142). The two states now differ in
-    /// both layers.
-    private func glyphColor(_ color: Color, isActive: Bool) -> Color {
-        if isActive || onSelection { return .white }
-        return color
-    }
-
-    private func discColor(_ color: Color, isActive: Bool) -> Color {
-        if isActive { return color }
-        return onSelection ? .white.opacity(0.25) : color.opacity(0.18)
+    private func actionButton(_ title: String, action: RuleAction) -> some View {
+        let disabledRule = decision?.action == action && decision?.enabled == false
+        return Button(title) { onDecide(action) }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .tint(action == .deny ? .red : nil)
+            .accessibilityLabel("\(title) \(subject)")
+            .help(disabledRule
+                  ? "Turn the existing rule back on: \(title.lowercased()) \(subject)."
+                  : "\(title) \(subject). You can change this later in Rules.")
     }
 }
 

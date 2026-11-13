@@ -65,10 +65,12 @@ struct NetworkMonitorView: View {
                 .labelsHidden()
                 .fixedSize()
                 .help("Show every app, or only the ones with denied connections.")
-                Button("Collapse all") { tree.collapseAll() }
-                    .buttonStyle(.borderless)
-                    .font(.callout)
-                    .help("Collapse every app in the list.")
+                Button { tree.collapseAll() } label: {
+                    Image(systemName: "rectangle.compress.vertical")
+                }
+                .buttonStyle(.borderless)
+                .help("Collapse every app in the list.")
+                .accessibilityLabel("Collapse all")
             }
         } content: {
             sidebarContent
@@ -76,42 +78,10 @@ struct NetworkMonitorView: View {
     }
 
     private var sidebarContent: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            MonitorTreeList(controller: tree,
-                            searchText: searchText,
-                            deniedOnly: model.monitorDeniedOnly,
-                            selectedAppID: $selectedProcess)
-
-            // The count and the collapse control belong in a status bar under
-            // the list, where Finder keeps "9 items", not crowding the search
-            // field out of its own row.
-            Divider()
-            HStack(spacing: 8) {
-                // The two bars on every row encode sent and received, and
-                // nothing said so anywhere (#76). The status bar is where
-                // Finder keeps this kind of standing information.
-                trafficLegend
-                Spacer()
-            }
-            .padding(.horizontal, 10).padding(.vertical, 6)
-            .background(.bar)
-        }
-    }
-
-    private var trafficLegend: some View {
-        HStack(spacing: 10) {
-            legendItem("Sent", color: MonitorTrafficBars.sentColor)
-            legendItem("Received", color: MonitorTrafficBars.receivedColor)
-        }
-        .padding(.leading, 4)
-    }
-
-    private func legendItem(_ label: String, color: Color) -> some View {
-        HStack(spacing: 4) {
-            Capsule().fill(color).frame(width: 12, height: 3)
-            Text(label).font(.caption).foregroundStyle(.secondary)
-        }
-        .accessibilityElement(children: .combine)
+        MonitorTreeList(controller: tree,
+                        searchText: searchText,
+                        deniedOnly: model.monitorDeniedOnly,
+                        selectedAppID: $selectedProcess)
     }
 
     private var mapPane: some View {
