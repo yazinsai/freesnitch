@@ -713,6 +713,22 @@ final class HelperClient: NSObject, ObservableObject {
         }
     }
 
+    private var insightsRejectionCount = 0
+    private var lastInsightsRejectionLog = Date.distantPast
+
+    /// A burst of rejected batches is one problem, not hundreds of log rows.
+    /// Log at most once a minute and carry the count of suppressed repeats.
+    private func noteInsightsBatchRejected(_ reason: String) {
+        insightsRejectionCount += 1
+        let now = Date()
+        guard now.timeIntervalSince(lastInsightsRejectionLog) >= 60 else { return }
+        let count = insightsRejectionCount
+        insightsRejectionCount = 0
+        lastInsightsRejectionLog = now
+        let suffix = count > 1 ? " (\(count) batches since the last report)" : ""
+        state?.appendLog(level: "error", message: "The helper rejected an insights batch: \(reason).\(suffix)")
+    }
+
     @discardableResult
     func ingestObservationBatch(_ data: Data) -> Bool {
         guard data.count <= InsightsLimits.maxBatchBytes else {
@@ -732,8 +748,7 @@ final class HelperClient: NSObject, ObservableObject {
         proxy.ingestObservationBatch(observationBatch: data) { [weak self] ok, message in
             guard !ok else { return }
             Task { @MainActor in
-                self?.state?.appendLog(level: "error",
-                                       message: "The helper rejected an insights batch: \(message ?? "unknown error").")
+                self?.noteInsightsBatchRejected(message ?? "unknown error")
             }
         }
         return true

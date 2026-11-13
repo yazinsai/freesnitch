@@ -178,7 +178,17 @@ final class HelperService: NSObject, HelperProtocol, @unchecked Sendable {
     private let insightsMaintenanceQueue = DispatchQueue(label: "io.isaaclins.freesnitch.insights-maintenance", qos: .utility)
     private var insightsMaintenanceTimer: DispatchSourceTimer?
     private let insightsObservationQueue = DispatchQueue(label: "io.isaaclins.freesnitch.insights-observations", qos: .utility)
-    private let insightsObservationSlots = DispatchSemaphore(value: 64)
+    /// Observations waiting for the writer. Batches from the extension are
+    /// merged here and written in large transactions, so a burst of small
+    /// batches costs one SQLite commit instead of one commit per batch.
+    private let insightsPendingLock = NSLock()
+    private var insightsPendingObservations: [FlowObservation] = []
+    private var insightsWriterScheduled = false
+    private static let maxPendingInsightsObservations = 64 * InsightsLimits.maxBatchCount
+    private static let insightsWriteChunk = 4 * InsightsLimits.maxBatchCount
+    private let insightsContactRefreshLock = NSLock()
+    private var insightsContactRefreshScheduled = false
+    private static let insightsContactRefreshDelay: TimeInterval = 10
     private let insightsDNSQueue = DispatchQueue(label: "io.isaaclins.freesnitch.insights-dns", qos: .utility)
     private let insightsDNSSlots = DispatchSemaphore(value: 256)
     /// Reads are answered off the XPC connection queue so a slow disk cannot
@@ -437,21 +447,66 @@ final class HelperService: NSObject, HelperProtocol, @unchecked Sendable {
             reply(false, "insights store is unavailable")
             return
         }
-        guard insightsObservationSlots.wait(timeout: .now()) == .success else {
+        insightsPendingLock.lock()
+        guard insightsPendingObservations.count + observations.count <= Self.maxPendingInsightsObservations else {
+            insightsPendingLock.unlock()
             noteInsightsDrop("observation")
             reply(false, "insights recording queue is full")
             return
         }
-        insightsObservationQueue.async { [weak self] in
-            defer { self?.insightsObservationSlots.signal() }
+        insightsPendingObservations.append(contentsOf: observations)
+        let startWriter = !insightsWriterScheduled
+        insightsWriterScheduled = true
+        insightsPendingLock.unlock()
+        if startWriter {
+            insightsObservationQueue.async { [weak self] in self?.drainPendingObservations(into: insights) }
+        }
+        reply(true, nil)
+    }
+
+    /// Writes everything queued so far in bounded transactions, then asks for
+    /// one coalesced contact-history refresh.
+    private func drainPendingObservations(into insights: InsightsStore) {
+        var wrote = false
+        while true {
+            insightsPendingLock.lock()
+            if insightsPendingObservations.isEmpty {
+                insightsWriterScheduled = false
+                insightsPendingLock.unlock()
+                break
+            }
+            let count = min(Self.insightsWriteChunk, insightsPendingObservations.count)
+            let chunk = Array(insightsPendingObservations.prefix(count))
+            insightsPendingObservations.removeFirst(count)
+            insightsPendingLock.unlock()
             do {
-                try insights.record(observations)
-                self?.insightsMaintenanceQueue.async { [weak self] in self?.refreshInsightsContactSnapshot() }
+                try insights.record(chunk)
+                wrote = true
             } catch {
                 PSLog.error(PSLog.helper, "Insights observation recording failed: \(error.localizedDescription)")
             }
         }
-        reply(true, nil)
+        if wrote { scheduleInsightsContactRefresh() }
+    }
+
+    /// The contact snapshot scans 14 days of raw evidence, so rebuilding it
+    /// after every batch starved the writer. Refreshes are coalesced: at most
+    /// one is pending, and it runs after a short delay.
+    private func scheduleInsightsContactRefresh() {
+        insightsContactRefreshLock.lock()
+        guard !insightsContactRefreshScheduled else {
+            insightsContactRefreshLock.unlock()
+            return
+        }
+        insightsContactRefreshScheduled = true
+        insightsContactRefreshLock.unlock()
+        insightsMaintenanceQueue.asyncAfter(deadline: .now() + Self.insightsContactRefreshDelay) { [weak self] in
+            guard let self else { return }
+            self.insightsContactRefreshLock.lock()
+            self.insightsContactRefreshScheduled = false
+            self.insightsContactRefreshLock.unlock()
+            self.refreshInsightsContactSnapshot()
+        }
     }
 
     /// Rebuilds the first-contact evidence on a utility queue. The snapshot is
