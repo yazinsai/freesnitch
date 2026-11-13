@@ -161,11 +161,16 @@ final class MenubarController {
         image?.isTemplate = true
         button.image = image
 
-        if state.showSpeedsInMenuBar {
+        if state.showSpeedsInMenuBar, let image {
+            // Compact readout: the two rates stacked in small type beside the
+            // icon, drawn as one template image so the item stays narrow and
+            // does not change width as the numbers change.
             statusItem.length = NSStatusItem.variableLength
-            button.imagePosition = .imageLeft
-            button.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
-            button.title = " ↓\(compactSpeed(state.currentIn))  ↑\(compactSpeed(state.currentOut))"
+            button.imagePosition = .imageOnly
+            button.title = ""
+            button.image = Self.compactImage(icon: image,
+                                             down: compactSpeed(state.currentIn),
+                                             up: compactSpeed(state.currentOut))
         } else {
             statusItem.length = NSStatusItem.squareLength
             button.imagePosition = .imageOnly
@@ -211,12 +216,38 @@ final class MenubarController {
         return "↓ \(PSFormat.bytesPerSec(state.currentIn))  ↑ \(PSFormat.bytesPerSec(state.currentOut))"
     }
 
+    /// At most four characters: "0K", "489K", "1.2M", "12M", "3.4G".
     private func compactSpeed(_ n: Int64) -> String {
-        let b = Double(n)
-        if b < 1024 { return "\(Int(b)) B/s" }
-        if b < 1024 * 1024 { return String(format: "%.0f K/s", b/1024) }
-        if b < 1024 * 1024 * 1024 { return String(format: "%.1f M/s", b/1024/1024) }
-        return String(format: "%.1f G/s", b/1024/1024/1024)
+        let k = Double(max(n, 0)) / 1024
+        if k < 999.5 { return String(format: "%.0fK", k) }
+        let m = k / 1024
+        if m < 9.95 { return String(format: "%.1fM", m) }
+        if m < 999.5 { return String(format: "%.0fM", m) }
+        let g = m / 1024
+        return g < 9.95 ? String(format: "%.1fG", g) : String(format: "%.0fG", g)
+    }
+
+    private static func compactImage(icon: NSImage, down: String, up: String) -> NSImage {
+        let font = NSFont.monospacedDigitSystemFont(ofSize: 9, weight: .medium)
+        let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.black]
+        // Fixed width from the widest possible value, so the item never jitters.
+        let textWidth = ceil(("↓999K" as NSString).size(withAttributes: attrs).width)
+        let lineHeight = ceil(font.ascender - font.descender)
+        let height: CGFloat = 22
+        let iconSize = NSSize(width: 14, height: 14)
+        let gap: CGFloat = 3
+        let size = NSSize(width: iconSize.width + gap + textWidth, height: height)
+        let image = NSImage(size: size, flipped: false) { _ in
+            icon.draw(in: NSRect(x: 0, y: (height - iconSize.height) / 2,
+                                 width: iconSize.width, height: iconSize.height))
+            let x = iconSize.width + gap
+            let top = (height + 2 * lineHeight) / 2 - lineHeight
+            ("↓" + down as NSString).draw(at: NSPoint(x: x, y: top - 1), withAttributes: attrs)
+            ("↑" + up as NSString).draw(at: NSPoint(x: x, y: top - lineHeight + 1), withAttributes: attrs)
+            return true
+        }
+        image.isTemplate = true
+        return image
     }
 }
 
