@@ -159,22 +159,34 @@ final class MenubarController {
         let image = NSImage(systemSymbolName: symbol, accessibilityDescription: "FreeSnitch")?
             .withSymbolConfiguration(config)
         image?.isTemplate = true
-        button.image = image
+
+        let down = state.currentIn
+        let up = state.currentOut
+        let alert = RateLevel(max(down, up))
+        // Normal traffic keeps a template image so the system recolours it for
+        // every menu bar style. Only heavy traffic switches to hand-drawn red.
+        let appearance = button.effectiveAppearance
 
         if state.showSpeedsInMenuBar, let image {
             // Compact readout: the two rates stacked in small type beside the
-            // icon, drawn as one template image so the item stays narrow and
-            // does not change width as the numbers change.
+            // icon, drawn as one image so the item stays narrow and does not
+            // change width as the numbers change.
             statusItem.length = NSStatusItem.variableLength
             button.imagePosition = .imageOnly
             button.title = ""
             button.image = Self.compactImage(icon: image,
-                                             down: compactSpeed(state.currentIn),
-                                             up: compactSpeed(state.currentOut))
+                                             down: compactSpeed(down), downLevel: RateLevel(down),
+                                             up: compactSpeed(up), upLevel: RateLevel(up),
+                                             alert: alert, appearance: appearance)
         } else {
             statusItem.length = NSStatusItem.squareLength
             button.imagePosition = .imageOnly
             button.title = ""
+            if let image, alert != .normal {
+                button.image = Self.alertIcon(icon: image, alert: alert, appearance: appearance)
+            } else {
+                button.image = image
+            }
         }
 
         button.toolTip = tooltip
@@ -227,26 +239,107 @@ final class MenubarController {
         return g < 9.95 ? String(format: "%.1fG", g) : String(format: "%.0fG", g)
     }
 
-    private static func compactImage(icon: NSImage, down: String, up: String) -> NSImage {
+    /// How loud the menu bar item gets for a transfer rate.
+    private enum RateLevel: Int, Comparable {
+        case normal, elevated, high
+
+        static let elevatedThreshold: Int64 = 100 * 1024     // > 100 KB/s: red text
+        static let highThreshold: Int64 = 1024 * 1024        // > 1 MB/s: red background
+
+        init(_ bytesPerSec: Int64) {
+            if bytesPerSec > Self.highThreshold { self = .high }
+            else if bytesPerSec > Self.elevatedThreshold { self = .elevated }
+            else { self = .normal }
+        }
+
+        static func < (a: RateLevel, b: RateLevel) -> Bool { a.rawValue < b.rawValue }
+    }
+
+    nonisolated private static let alertRed = NSColor.systemRed
+
+    /// Draws `icon` (a template symbol) filled with `color`.
+    nonisolated private static func tinted(_ icon: NSImage, _ color: NSColor) -> NSImage {
+        let image = NSImage(size: icon.size, flipped: false) { rect in
+            icon.draw(in: rect)
+            color.set()
+            rect.fill(using: .sourceAtop)
+            return true
+        }
+        image.isTemplate = false
+        return image
+    }
+
+    /// Fills the item's background with a red rounded pill.
+    nonisolated private static func drawAlertBackground(in rect: NSRect) {
+        alertRed.setFill()
+        NSBezierPath(roundedRect: rect.insetBy(dx: 0, dy: 2), xRadius: 4, yRadius: 4).fill()
+    }
+
+    /// Icon-only mode: red icon above 100 KB/s, white icon on red above 1 MB/s.
+    private static func alertIcon(icon: NSImage, alert: RateLevel, appearance: NSAppearance) -> NSImage {
+        let height: CGFloat = 22
+        let iconSize = NSSize(width: 14, height: 14)
+        let pad: CGFloat = 3
+        let size = NSSize(width: iconSize.width + 2 * pad, height: height)
+        let image = NSImage(size: size, flipped: false) { rect in
+            appearance.performAsCurrentDrawingAppearance {
+                if alert == .high { drawAlertBackground(in: rect) }
+                let color: NSColor = alert == .high ? .white : alertRed
+                tinted(icon, color).draw(in: NSRect(x: pad, y: (height - iconSize.height) / 2,
+                                                    width: iconSize.width, height: iconSize.height))
+            }
+            return true
+        }
+        image.isTemplate = false
+        return image
+    }
+
+    private static func compactImage(icon: NSImage,
+                                     down: String, downLevel: RateLevel,
+                                     up: String, upLevel: RateLevel,
+                                     alert: RateLevel, appearance: NSAppearance) -> NSImage {
         let font = NSFont.monospacedDigitSystemFont(ofSize: 9, weight: .medium)
-        let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.black]
+        let baseAttrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.black]
         // Fixed width from the widest possible value, so the item never jitters.
-        let textWidth = ceil(("↓999K" as NSString).size(withAttributes: attrs).width)
+        let textWidth = ceil(("↓999K" as NSString).size(withAttributes: baseAttrs).width)
         let lineHeight = ceil(font.ascender - font.descender)
         let height: CGFloat = 22
         let iconSize = NSSize(width: 14, height: 14)
         let gap: CGFloat = 3
-        let size = NSSize(width: iconSize.width + gap + textWidth, height: height)
-        let image = NSImage(size: size, flipped: false) { _ in
-            icon.draw(in: NSRect(x: 0, y: (height - iconSize.height) / 2,
-                                 width: iconSize.width, height: iconSize.height))
-            let x = iconSize.width + gap
-            let top = (height + 2 * lineHeight) / 2 - lineHeight
-            ("↓" + down as NSString).draw(at: NSPoint(x: x, y: top - 1), withAttributes: attrs)
-            ("↑" + up as NSString).draw(at: NSPoint(x: x, y: top - lineHeight + 1), withAttributes: attrs)
+        // A little padding on both sides so the red pill does not hug the glyphs.
+        let pad: CGFloat = alert == .high ? 3 : 0
+        let size = NSSize(width: pad + iconSize.width + gap + textWidth + pad, height: height)
+        let isTemplate = alert == .normal
+
+        let image = NSImage(size: size, flipped: false) { rect in
+            appearance.performAsCurrentDrawingAppearance {
+                // Template images only use alpha, so black is fine there. Once
+                // we draw real colours, plain text follows the menu bar's label
+                // colour and everything goes white on the red background.
+                let plain: NSColor = isTemplate ? .black : (alert == .high ? .white : .labelColor)
+                func color(for level: RateLevel) -> NSColor {
+                    if alert == .high { return .white }
+                    return level >= .elevated ? alertRed : plain
+                }
+
+                if alert == .high { drawAlertBackground(in: rect) }
+
+                let iconRect = NSRect(x: pad, y: (height - iconSize.height) / 2,
+                                      width: iconSize.width, height: iconSize.height)
+                if isTemplate { icon.draw(in: iconRect) } else { tinted(icon, plain).draw(in: iconRect) }
+
+                let x = pad + iconSize.width + gap
+                let top = (height + 2 * lineHeight) / 2 - lineHeight
+                var downAttrs = baseAttrs
+                downAttrs[.foregroundColor] = color(for: downLevel)
+                var upAttrs = baseAttrs
+                upAttrs[.foregroundColor] = color(for: upLevel)
+                ("↓" + down as NSString).draw(at: NSPoint(x: x, y: top - 1), withAttributes: downAttrs)
+                ("↑" + up as NSString).draw(at: NSPoint(x: x, y: top - lineHeight + 1), withAttributes: upAttrs)
+            }
             return true
         }
-        image.isTemplate = true
+        image.isTemplate = isTemplate
         return image
     }
 }
